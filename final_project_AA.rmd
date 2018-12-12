@@ -1,0 +1,254 @@
+---
+title: "final_project_AA"
+author: "lucy"
+date: "December 5, 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+Load packages
+```{r}
+### Load helper packages ###
+loadlibs = function(libs) {
+  for(lib in libs) {
+    class(lib)
+    if(!do.call(require,as.list(lib))) {install.packages(lib)}
+    do.call(require,as.list(lib))
+  }
+}
+libs = c("tidyr","magrittr","purrr","dplyr","stringr","readr","data.table", "lubridate")
+loadlibs(libs)
+```
+
+Load data 2007-2008,2005-2006 from RNHANES
+```{r}
+library(RNHANES)
+#Df_total <- nhanes_data_files() # gives you the list of files.
+
+#demographic, gender, age, race, total number of people in the family and household
+demo07 <- nhanes_load_data("DEMO_E", year = "2007-2008")%>%data.frame()%>%as_tibble()%>%select(SEQN, RIAGENDR, DMDHRAGE,RIDRETH1, DMDFMSIZ,DMDHHSIZ)
+demo06 <- nhanes_load_data("DEMO_D", year = "2005-2006")%>%data.frame()%>%as_tibble()%>%select(SEQN, RIAGENDR, DMDHRAGE,RIDRETH1, DMDFMSIZ,DMDHHSIZ)
+
+#Ophthalmology, Y(retinopothy), retinal microaneurysms, retinal hard exudate
+reti07 = nhanes_load_data("OPXRET_E", year = "2007-2008")%>%data.frame()%>%as_tibble()%>%select(SEQN,OPDDARMA,OPDSARMA,OPDUHEM,OPDUHE,OPDUSE)
+reti06 = nhanes_load_data("OPXRET_D", year = "2005-2006")%>%data.frame()%>%as_tibble()%>%select(SEQN,OPDDARMA,OPDSARMA,OPDUHEM,OPDUHE,OPDUSE)
+
+
+#vision,had surgery for cataract before, visual acuity of left eyes and right eyes, wearing glasses or not
+vision_07 <- nhanes_load_data("VIX_E", year = "2007-2008")%>%data.frame()%>%as_tibble%>%select(SEQN,VIQ200,VIDLOVA, VIDROVA, VIQ150)
+vision_06 <- nhanes_load_data("VIX_D", year = "2005-2006")%>%data.frame()%>%as_tibble%>%select(SEQN,VIQ200,VIDLOVA, VIDROVA,VIQ150)
+
+
+#bmx, BOdy mass index, weight
+bmx_07 <- nhanes_load_data("BMX_E", year = "2007-2008")%>%data.frame()%>%as_tibble%>%select(SEQN,BMXBMI, BMXWT)
+bmx_06 <- nhanes_load_data("BMX_D", year = "2005-2006")%>%data.frame()%>%as_tibble%>%select(SEQN,BMXBMI, BMXWT)
+
+#glu, fasting glucose
+glu_07 <- nhanes_load_data("GLU_E", year = "2007-2008")%>%data.frame()%>%as_tibble%>%select(SEQN,LBXGLU)
+glu_06 <- nhanes_load_data("GLU_D", year = "2005-2006")%>%data.frame()%>%as_tibble%>%select(SEQN,LBXGLU)
+
+
+```
+
+Join data, Split data into train and test
+```{r}
+
+#Join the data in 2007
+patient07 = reti07%>%left_join(demo07,by = "SEQN")%>%left_join(vision_07,by = "SEQN")%>%left_join(bmx_07,by = "SEQN")%>%left_join(glu_07,by = "SEQN")
+
+#create Y column
+patient07=patient07%>%mutate(RETI = ifelse(OPDDARMA==1|OPDSARMA==1,1,0))%>%select(-OPDDARMA,-OPDSARMA,-SEQN)
+
+#join data in 2006
+patient06 = reti06%>%left_join(demo06,by = "SEQN")%>%left_join(vision_06,by = "SEQN")%>%left_join(bmx_06,by = "SEQN")%>%left_join(glu_06,by = "SEQN")
+
+patient06=patient06%>%mutate(RETI = ifelse(OPDDARMA==1|OPDSARMA==1,1,0))%>%select(-OPDDARMA,-OPDSARMA,-SEQN)
+
+#combine all the data
+patient = patient07%>%rbind(patient06)
+
+patient=patient%>%filter(!is.na(RETI))%>%filter(DMDHRAGE>=40)
+
+
+#randominze the data and split 
+set.seed(504)
+patient=patient[sample(1:nrow(patient)),]
+
+summary(patient)
+
+#70% as train, 30% as test
+p_train = patient[1:as.integer(nrow(patient)*0.7),]
+p_test = patient[-(1:as.integer(nrow(patient)*0.7)),]
+
+
+```
+
+
+Impute training data and include all imputed data as training data
+Impute testing data and include all imputed data as testing data
+
+```{r}
+#imputation
+#I use mutiple imputation to impute the missing data. Because in this case, the missing data is MCAR so that can use MICE to impute.
+#install.packages("mice")
+library(mice) 
+
+ptrain = mice(p_train %>% 
+              select(-RETI) %>% 
+              mutate_if(is.character, as.factor),m=10,maxit = 5) 
+
+# Get all imputed data set
+alldata = function(x,y){
+  imputed_p = NULL
+  for (i in (1:5)){
+    imp = complete(x,i) %>% as_tibble()
+    names(imp) = lapply(names(imp), paste0, "_imputed")
+    # Rename those columns in case you want to column append
+    miss = apply(y,FUN = (function(x) any(is.na(x))),MARGIN = 2)
+    miss = miss[-which(names(miss)=="RETI")]
+    imp = imp[,paste0(names(miss %>% t() %>% data.frame()),"_imputed")]
+    imputed = data.frame(RETI = y$RETI) %>% bind_cols(imp) %>% as_tibble()
+    imputed_p = imputed_p%>%rbind(imputed)
+  }
+  imputed_p
+    
+}
+
+imputed_ptrain = alldata(ptrain,p_train)
+
+
+#get test imputed data
+ptest = mice(p_test %>% 
+              select(-RETI) %>% 
+              mutate_if(is.character, as.factor),m=10,maxit = 5) 
+imputed_ptest = alldata(ptest,p_test)
+
+```
+
+Without ophthalmology variables:  this analysis is intended for the situation where you know very little about the person (e.g. demographics only), and you want to know what effect measuring fasting blood glucose will have on risk of retinopathy.
+Preparation: Data that has glucose or not
+```{r}
+p_train_noo_noglu = imputed_ptrain%>%select(-c(OPDUHEM_imputed,OPDUHE_imputed,OPDUSE_imputed,LBXGLU_imputed))
+p_train_noo_glu = imputed_ptrain%>%select(-c(OPDUHEM_imputed,OPDUHE_imputed,OPDUSE_imputed))
+
+
+p_test_noo_noglu = imputed_ptest%>%select(-c(OPDUHEM_imputed,OPDUHE_imputed,OPDUSE_imputed,LBXGLU_imputed))
+p_test_noo_glu = imputed_ptest%>%select(-c(OPDUHEM_imputed,OPDUHE_imputed,OPDUSE_imputed))
+
+```
+
+trian the model
+```{r}
+#logistic regression
+ptrain_lr_noo_noglu = glm(RETI == 1 ~ ., data =p_train_noo_noglu ,  family = binomial("logit"))
+
+ptrain_lr_noo_glu = glm(RETI == 1 ~ ., data =p_train_noo_glu ,  family = binomial("logit"))
+
+summary(ptrain_lr_noo_noglu)
+summary(ptrain_lr_noo_glu)
+
+```
+
+Test model and See the comparation results of -ophthalmology,(+-glucose)
+```{r}
+library(pROC)
+
+#par(mar=c(5,4,5,3), xpd=TRUE)
+#lr roc
+result_lr_noo_noglu = p_test_noo_noglu%>%select(RETI)%>%bind_cols(pred = predict(ptrain_lr_noo_noglu, p_test_noo_noglu, type  = "response"))%>%na.omit()
+result_lr_noo_glu = p_test_noo_glu%>%select(RETI)%>%bind_cols(pred = predict(ptrain_lr_noo_glu,p_test_noo_glu, type  = "response"))%>%na.omit()
+
+
+lrroc_noo_noglu <- roc(result_lr_noo_noglu$RETI,result_lr_noo_noglu$pred)
+plot(lrroc_noo_noglu, print.auc=TRUE,col = "red",print.auc.x = 0.2,print.auc.y = 0.5)
+
+par(new=TRUE)
+
+lrroc_noo_glu <- roc(result_lr_noo_glu$RETI,result_lr_noo_glu$pred)
+plot(lrroc_noo_glu, print.auc=TRUE,col = "green",print.auc.x = 0.4,print.auc.y = 0.6)
+
+
+#imputed_ptest$RETI = as.factor(imputed_ptest$RETI)
+#rf roc
+#result_rf = imputed_ptest%>%select(RETI)%>%bind_cols(pred = predict(pforest, imputed_ptest, type = "prob"))%>%na.omit()
+
+#rfroc <- roc(result_rf$RETI,as.numeric(result_rf$pred))
+#plot(rfroc, print.auc=TRUE,col = "green",add=TRUE,print.auc.x = 0.4,print.auc.y = 0.4)
+
+
+legend("topright", c("Without ophthalmology Without Glucose", "Without ophthalmology With Glucose"), lty=2, 
+    col = c("red", "green"), bty="n", inset=c(0,0.5))
+
+#without glucose
+glm.pred1 = rep("0",7730)
+glm.pred1[result_lr_noo_noglu$pred>.5] = "1"
+table(glm.pred1,p_test_noo_noglu$RETI)
+
+#with glucose
+glm.pred2 = rep("0",7730)
+glm.pred2[result_lr_noo_glu$pred>.5] = "1"
+table(glm.pred2,p_test_noo_glu$RETI)
+
+```
+
+
+With ophthalmology variables:  this analysis is intended for the situation where you know very little about the person (e.g. demographics only), and you want to know what effect measuring fasting blood glucose will have on risk of retinopathy.
+Preparation: Data that has glucose or not
+```{r}
+p_train_o_noglu = imputed_ptrain%>%select(-LBXGLU_imputed)
+p_train_o_glu = imputed_ptrain
+
+
+p_test_o_noglu = imputed_ptest%>%select(-LBXGLU_imputed)
+p_test_o_glu = imputed_ptest
+
+```
+
+trian the model
+```{r}
+#logistic regression
+ptrain_lr_o_noglu = glm(RETI == 1 ~ ., data =p_train_o_noglu ,  family = binomial("logit"))
+
+ptrain_lr_o_glu = glm(RETI == 1 ~ ., data =p_train_o_glu ,  family = binomial("logit"))
+
+summary(ptrain_lr_o_noglu)
+summary(ptrain_lr_o_glu)
+
+```
+
+Test model and See the comparation results of +ophthalmology,(+-glucose)
+```{r}
+library(pROC)
+
+par(mar=c(5,4,5,3), xpd=TRUE)
+#lr roc
+result_lr_o_noglu = p_test_o_noglu%>%select(RETI)%>%bind_cols(pred = predict(ptrain_lr_o_noglu, p_test_o_noglu, type  = "response"))%>%na.omit()
+result_lr_o_glu = p_test_o_glu%>%select(RETI)%>%bind_cols(pred = predict(ptrain_lr_o_glu,p_test_o_glu, type  = "response"))%>%na.omit()
+
+
+lrroc_o_noglu <- roc(result_lr_o_noglu$RETI,result_lr_o_noglu$pred)
+plot(lrroc_o_noglu, print.auc=TRUE,col = "red",print.auc.x = 0.2,print.auc.y = 0.5)
+
+par(new=TRUE)
+
+lrroc_o_glu <- roc(result_lr_o_glu$RETI,result_lr_o_glu$pred)
+plot(lrroc_o_glu, print.auc=TRUE,col = "green",print.auc.x = 0.4,print.auc.y = 0.6)
+
+
+legend("topright", c("With ophthalmology Without Glucose", "With ophthalmology With Glucose"), lty=2, 
+    col = c("red", "green"), bty="n", inset=c(0,0.5))
+
+#without glucose
+glm.pred3 = rep("0",7730)
+glm.pred3[result_lr_o_noglu$pred>.5] = "1"
+table(glm.pred3,p_test_o_noglu$RETI)
+
+#with glucose
+glm.pred4 = rep("0",7730)
+glm.pred4[result_lr_o_glu$pred>.5] = "1"
+table(glm.pred4,p_test_o_glu$RETI)
+
+```
+
+
